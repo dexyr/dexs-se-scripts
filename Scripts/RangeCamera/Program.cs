@@ -21,13 +21,6 @@ namespace IngameScript
 {
     partial class Program : MyGridProgram
     {
-        /*
-         * literally my first script after looking into the documentation
-         * supposed to give a real-time travel ETA for a target position (via camera raytracing)
-         * unfortunately, it loses accuracy unless the ship is traveling directly towards the target (which is a bad idea)
-         * doesn't work well with variable velocity either, though this could somewhat be remedied with some calculus (given constant accel)
-         * i wont be finishing this, but i'm keeping it for reference
-         */
         #region in-game
         // apparently it's better to not allocate memory during runtime
         // so most variables are created here

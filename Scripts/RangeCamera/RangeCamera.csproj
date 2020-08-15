@@ -4,7 +4,7 @@
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{D3109CC1-CACA-427E-9AEF-0E5357C36117}</ProjectGuid>
+    <ProjectGuid>{A16CF9CB-7A64-4D17-9539-17541AC9AE27}</ProjectGuid>
     <OutputType>Exe</OutputType>
     <RootNamespace>IngameScript</RootNamespace>
     <AssemblyName>RangeCamera</AssemblyName>
