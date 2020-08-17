@@ -49,11 +49,14 @@ namespace IngameScript
         // resusable lists
         // i chose 'Blocks' instead of 'Inventories' because it's shorter
         List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
-        List<MyInventoryItem> items = new List<MyInventoryItem>();  
+        List<MyInventoryItem> items = new List<MyInventoryItem>();
 
         // terminal i/o
+        List<IMyTerminalBlock> panels = new List<IMyTerminalBlock>();
         IMyTextSurface pBlockSurface;
-        RectangleF viewRect = new RectangleF();
+        IMyTextPanel outPanel;
+        RectangleF pBlockViewRect = new RectangleF();
+        RectangleF outViewRect = new RectangleF();
 
         public Program()
         {
@@ -85,7 +88,16 @@ namespace IngameScript
             pBlockSurface = Me.GetSurface(0);
             pBlockSurface.ContentType = ContentType.SCRIPT;
             pBlockSurface.Script = "";
-            viewRect = new RectangleF((pBlockSurface.TextureSize - pBlockSurface.SurfaceSize) / 2f, pBlockSurface.SurfaceSize);
+            pBlockViewRect = new RectangleF((pBlockSurface.TextureSize - pBlockSurface.SurfaceSize) / 2f, pBlockSurface.SurfaceSize);
+
+            GridTerminalSystem.SearchBlocksOfName("[out]", blocks, b => b is IMyTextPanel);
+            if (blocks.Count > 0)
+            {
+                outPanel = (blocks[0] as IMyTextPanel);
+                outPanel.ContentType = ContentType.SCRIPT;
+                outPanel.Script = "";
+                outViewRect = new RectangleF((outPanel.TextureSize - outPanel.SurfaceSize) / 2f, outPanel.SurfaceSize);
+            }
 
             // find inventories
             // only takes lists of IMyTerminalBlock, which means annoying casting later
@@ -110,9 +122,16 @@ namespace IngameScript
                 SortItems();
 
                 // terminal i/o
-                var frame = pBlockSurface.DrawFrame();
-                OutputToDisplay(ref frame);
-                frame.Dispose();
+                var pBlockFrame = pBlockSurface.DrawFrame();
+                OutputInventory(ref pBlockFrame, pBlockViewRect);
+                pBlockFrame.Dispose();
+
+                if (outPanel != null)
+                {
+                    var outFrame = outPanel.DrawFrame();
+                    OutputInventory(ref outFrame, outViewRect);
+                    outFrame.Dispose();
+                }
             }
         }
 
@@ -169,8 +188,6 @@ namespace IngameScript
                 }
             }
             // anything still in the list can be used for misc. storage
-            // there's gotta be a one-liner for this
-            // (i like to believe we don't still live in the caveman days where we have to copy elements manually)
             for (int c = blocks.Count - 1; c >= 0; c--)
             {
                 // again, saving my precious fingers
@@ -190,9 +207,9 @@ namespace IngameScript
             Echo("sorting");
             // push items out of the wrong inventories
             // i'm using the key because it's necessary for PushItem
-            foreach (string name in categories.Keys)
+            foreach (string catName in categories.Keys)
             {
-                foreach (IMyInventory inv in categories[name].Inventories)
+                foreach (IMyInventory inv in categories[catName].Inventories)
                 {
                     items.Clear();
                     inv.GetItems(items);
@@ -203,11 +220,11 @@ namespace IngameScript
                         // not sure if this would conflict with mods (that's something i don't wanna bother with)
                         string typePrefix = i.Type.ToString().Split('/')[0];
                         Echo($"item type: {i.Type.ToString()}");
-                        Echo($"category type: {categories[name].TypePrefix}");
+                        Echo($"category type: {categories[catName].TypePrefix}");
 
                         // item is in the wrong inventory
-                        if (!typePrefix.Equals(categories[name].TypePrefix))
-                            PushItem(name, inv, i, typePrefix);
+                        if (!typePrefix.Equals(categories[catName].TypePrefix))
+                            PushItem(catName, inv, i, typePrefix);
                     }
                 }
             }
@@ -267,39 +284,63 @@ namespace IngameScript
         
         // reusing this as well
         // should add support for larger terminals
-        private void OutputToDisplay(ref MySpriteDrawFrame frame)
+        private void OutputInventory(ref MySpriteDrawFrame frame, RectangleF viewRect)
         {
-            Vector2 pos = viewRect.Position + viewRect.Size / 2f;
+            // max 10-ish? for 2 cols of 5
+            int barIndex = 0;
+            float xOffset = viewRect.Size.X / (2f * 2);
+            float cWidth = viewRect.Size.X / 2f;
+            float yOffset = viewRect.Size.Y / (4f * 2);
+            float rHeight = viewRect.Size.Y / (4f);
 
-            double percent = categories["ore"].CurrentVolume.RawValue / categories["ore"].MaxVolume.RawValue;
-
-            MySprite sprite = new MySprite()
+            foreach (string name in categories.Keys)
             {
-                Type = SpriteType.TEXT,
-                Data = $"[--------------------]",
-                Position = pos,
-                RotationOrScale = 0.75f,
-                Color = Color.White,
-                Alignment = TextAlignment.CENTER,
-                FontId = "White"
-            };
 
-            frame.Add(sprite);
+                Category cat = categories[name];
 
-            pos.Y += 20;
-            sprite = new MySprite()
-            {
-                Type = SpriteType.TEXT,
-                Data = $"[|||||---------------]",
-                Position = pos,
-                RotationOrScale = 0.75f,
-                Color = Color.White,
-                Alignment = TextAlignment.CENTER,
-                FontId = "White"
-            };
+                if (cat.Inventories.Count > 0)
+                {
+                    float x = viewRect.X + xOffset + (barIndex / 4) * cWidth;
+                    float y = viewRect.Y + yOffset + (barIndex % 4) * rHeight;
 
-            frame.Add(sprite);
+                    Vector2 pos = new Vector2(x, y);
+
+
+                    pos.Y -= 10;
+                    double percent = cat.CurrentVolume.RawValue / cat.MaxVolume.RawValue;
+                    int filled = (int)Math.Round(percent * 10);
+                    string bar = $"[{new String('|', filled)}{new String('-', 10 - filled)}]";
+
+                    MySprite sprite = new MySprite()
+                    {
+                        Type = SpriteType.TEXT,
+                        Data = $"{bar}",
+                        Position = pos,
+                        RotationOrScale = 0.75f,
+                        Color = Color.White,
+                        Alignment = TextAlignment.CENTER,
+                        FontId = "Monospace"
+                    };
+                    frame.Add(sprite);
+
+                    pos.Y += 20;
+                    sprite = new MySprite()
+                    {
+                        Type = SpriteType.TEXT,
+                        Data = $"{name}",
+                        Position = pos,
+                        RotationOrScale = 0.75f,
+                        Color = Color.White,
+                        Alignment = TextAlignment.CENTER,
+                        FontId = "Monospace"
+                    };
+
+                    frame.Add(sprite);
+                    barIndex++;
+                }
+            }
         }
+
 
         // reusing this sort of thing
         // i'm aware that saving ini in custom data isn't recommended, but it's only read/written on recompile and saves
