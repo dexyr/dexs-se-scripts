@@ -1,7 +1,33 @@
 ﻿R e a d m e
 -----------
 
-add the relevant tag to the name of any cargo containers that should be sorted
-containers can only have one tag
-any untagged containers will be used for misc. storage (anything that doesn't have a designated container)
-only works on cargo containers currently, refineries and assemblers are pretty good about pulling things when necessary
+author: dexyr
+version: 1.0
+release: 8-19-20
+
+what it does:
++ inventories (except assemblers, reactors, etc.) can be tagged with category/item names and will sort themselves,
+    assuming that there is enough space to move items around (think of it as a whitelist system)
++ allows tags to be changed in the custom data (so you can use Fe instead of iron)
+    (tags are case-sensitive; check the programming block's custom data if you are unsure of how a block is tagged)
+
+what it does not do:
+- work reliably (hasn't been tested enough)
+- run well (startup is ~10-20ms and each subsequent run is ~0.2-0.8ms)
+- interfere with assemblers, refineries, reactors, or o2/h2 gens (it ignores these blocks)
+- work with sorters (haven't tested)
+- work with unconnected inventories (i mean of course it wouldn't work)
+
+instructions:
+* ensure that your inventories are connected and not full
+* add the script to a programming block on the same grid as the inventories you would like to 'manage'
+* in the custom data of the blocks, add the relevant tags for items that you'd like whitelisted (each on a new line)
+    (note: the tags are case (and space) sensitive! change the custom data in the programming block and recompile if you don't like them)
+* sit back, enjoy the sorting, and report back if you encounter any bugs
+
+extra notes:
+  by default, the tags for the blocks are what you see when you hover over them, except fully lowercase
+  you can use groups (check the top of the programming block's custom data for the names),
+    but you can also create 'custom' groups by adding all the relevant tags to the custom data of an inventory
+  i would not recommend using this on servers or large inventory systems (feel free to let me know it fares though)
+  i can probably tweak or add functionality (at my discretion) if people actually use this, so let me know if you have any suggestions

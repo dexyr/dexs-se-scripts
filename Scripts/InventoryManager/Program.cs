@@ -23,12 +23,12 @@ namespace IngameScript
     {
         #region in-game
 
-        /*
-         * there's still some unintended behaviour that should be addressed
-         * not very important: items will not be sorted (even into the general category) if they are not in the dictionary
-         */
-
         class Category {
+            /*
+             * the main thin that makes this work
+             * this handles the different sorting categories that items/blocks can belong to
+             */
+
             public string IniSection { get; }
             public string Type { get; }
             public string Tag { get; set; }
@@ -45,11 +45,15 @@ namespace IngameScript
 
         class InventoryManager
         {
+            /*
+             * it's in the name; handles 'sorting'
+             */
+
             Program parent;
 
             MyIni ini = new MyIni();
 
-            public Dictionary<string, Category> categories { get; } = new Dictionary<string, Category>
+            public Dictionary<string, Category> Categories { get; } = new Dictionary<string, Category>
             {
                 // general item types
                 ["Ore"] = new Category("general", "MyObjectBuilder_Ore"),
@@ -161,28 +165,32 @@ namespace IngameScript
                 // datapad
                 ["Datapad Item"] = new Category("datapad", "MyObjectBuilder_Datapad/Datapad"), // again
 
-                // datapad
+                // space credit
                 ["Space Credit"] = new Category("physical object", "MyObjectBuilder_PhysicalObject/SpaceCredit") // again
             };
 
-            int a = (int)Base6Directions.Direction.Up;
+            public Dictionary<string, Category> ActiveCategories { get; } = new Dictionary<string, Category>(); // hoping this helps performance
 
             List<IMyTerminalBlock> miscInventoryBlocks = new List<IMyTerminalBlock>();
             public MyFixedPoint CurrentMiscVolume { get; set; }
             public MyFixedPoint MaxMiscVolume { get; set; }
 
             // lookups
-            Dictionary<string, string> typeToCategory = new Dictionary<string, string>();
-            Dictionary<string, string> tagToCategory = new Dictionary<string, string>();
+            Dictionary<string, string> typeToCategoryKey = new Dictionary<string, string>();
+            Dictionary<string, string> tagToCategoryKey = new Dictionary<string, string>();
 
             // todo: make sure rebuilding this lookup every time isn't taking too long
-            Dictionary<long, List<string>> idToCategories = new Dictionary<long, List<string>>();
+            // this might be overkill, since most inventories will only have a small number of assigned ategories
+            Dictionary<long, HashSet<string>> idToCategoryKeySet = new Dictionary<long, HashSet<string>>();
 
-            // holds all relevant blocks for each sorting run
+            // valid blocks for the sorting system
             List<IMyTerminalBlock> inventoryBlocks = new List<IMyTerminalBlock>();
 
             // reusable list
             List<MyInventoryItem> items = new List<MyInventoryItem>();
+
+            // reusable newline thingy cause why, why doesn't c# have a built-in line-split function
+            char[] newLine = { '\n' };
 
             public InventoryManager(Program parent)
             {
@@ -192,11 +200,11 @@ namespace IngameScript
                 LoadIni();
                 SaveIni();
 
-                foreach (string name in categories.Keys)
+                foreach (string name in Categories.Keys)
                 {
-                    Category category = categories[name];
-                    typeToCategory[category.Type] = name;
-                    tagToCategory[category.Tag] = name;
+                    Category category = Categories[name];
+                    typeToCategoryKey[category.Type] = name; // this could be declared above
+                    tagToCategoryKey[category.Tag] = name; // this cannot (needs ini to be loaded)
                 }
             }
 
@@ -208,18 +216,16 @@ namespace IngameScript
 
                 if (ini.TryParse(parent.Me.CustomData))
                 {
-                    foreach (string name in categories.Keys)
+                    foreach (string name in Categories.Keys)
                     {
                         string iniName = name.ToLower().Replace(' ', '_');
-                        categories[name].Tag = ini.Get(categories[name].IniSection, $"{iniName}_tag").ToString($"[{name.ToLower()}]");
+                        Categories[name].Tag = ini.Get(Categories[name].IniSection, $"{iniName}_tag").ToString($"{name.ToLower()}");
                     }
                 }
                 else // invalid/missing ini
                 {
-                    foreach (string name in categories.Keys)
-                    {
-                        categories[name].Tag = $"[{name.ToLower()}]";
-                    }
+                    foreach (string name in Categories.Keys)
+                        Categories[name].Tag = $"{name.ToLower()}";
                 }
             }
 
@@ -229,10 +235,10 @@ namespace IngameScript
                  * saving tags to custom data
                  */
 
-                foreach (string name in categories.Keys)
+                foreach (string name in Categories.Keys)
                 {
                     string iniName = name.ToLower().Replace(' ', '_');
-                    ini.Set(categories[name].IniSection, $"{iniName}_tag", categories[name].Tag);
+                    ini.Set(Categories[name].IniSection, $"{iniName}_tag", Categories[name].Tag);
                 }
 
                 // i wish i could put this above the loop (since that's where it shows in-game)
@@ -245,71 +251,107 @@ namespace IngameScript
                 parent.Me.CustomData = ini.ToString();
             }
 
-            public void GetInventories()
+            public void UpdateInventories()
             {
                 /*
                  * grabs all blocks with inventories on the grid (except assemblers, reactors, etc.)
                  * adds blocks to different sorting categories (potentially multiple)
                  */
 
+                ClearGridInfo();
+
                 inventoryBlocks.Clear();
-                foreach (Category category in categories.Values)
+                parent.GridTerminalSystem.GetBlocksOfType(inventoryBlocks, b => InventoryBlockIsValid(b));
+
+                foreach (IMyTerminalBlock block in inventoryBlocks)
+                {
+                    if (!idToCategoryKeySet.ContainsKey(block.EntityId)) // to avoid creating new dictionaries literally every run
+                        idToCategoryKeySet[block.EntityId] = new HashSet<string>();
+
+                    if (!AddCategoriesToBlock(block))
+                    {
+                        miscInventoryBlocks.Add(block);
+
+                        IMyInventory inventory = block.GetInventory();
+                        CurrentMiscVolume += inventory.CurrentVolume;
+                        MaxMiscVolume += inventory.MaxVolume;
+                    }
+                }
+            }
+
+            private bool InventoryBlockIsValid(IMyTerminalBlock block)
+            {
+                /*
+                 * used in the lambda above
+                 */
+
+                return block.HasInventory && !(block is IMyProductionBlock ||
+                    block is IMyPowerProducer || block is IMyGasGenerator);
+            }
+
+            private void ClearGridInfo()
+            {
+                /*
+                 * there's probably a better name, but this clears the knowledge of grid blocks so they can be repopulated
+                 */
+
+                // todo: fix a lot of this. Clear() is probably making the gc very upset
+                // prioritizing gc over complexity may be the best thing to do
+                // that or only modifying based on changes
+                
+                inventoryBlocks.Clear();
+
+                foreach (Category category in ActiveCategories.Values)
                 {
                     category.CurrentVolume = 0;
                     category.MaxVolume = 0;
                     category.Inventories.Clear();
                 }
+                ActiveCategories.Clear();
 
                 miscInventoryBlocks.Clear();
                 CurrentMiscVolume = MyFixedPoint.Zero;
                 MaxMiscVolume = MyFixedPoint.Zero;
 
-                foreach (List<string> blockCategories in idToCategories.Values)
-                {
-                    blockCategories.Clear(); // doing this instead of clearing the dictionary (that way we don't have to make new lists)
-                }
+                // this could eventually get bloated if many blocks are removed from the grid since they will remain in the dictionary
+                // or if the grid changes (and all blockids are changed)
+                foreach (HashSet<string> categoryKeySet in idToCategoryKeySet.Values)
+                    categoryKeySet.Clear(); // doing this instead of clearing the dictionary (that way we don't have to make new hashsets)
+            }
 
-                parent.GridTerminalSystem.GetBlocksOfType(inventoryBlocks, b => b.HasInventory);
+            private bool AddCategoriesToBlock(IMyTerminalBlock block)
+            {
+                /*
+                 * try (and add) all relevant categories to a block, mark the category as active, and increment inventory counts
+                 * true if any category was added, false if not
+                 */
 
-                foreach (IMyTerminalBlock block in inventoryBlocks)
+                bool hasCategory = false;
+
+                string[] customData = block.CustomData.Split(newLine);
+
+                foreach (string tag in customData)
                 {
-                    if (block.HasInventory && !((block is IMyProductionBlock)
-                        || (block is IMyPowerProducer) || (block is IMyGasGenerator)))
+                    string categoryKey;
+
+                    if (tagToCategoryKey.TryGetValue(tag, out categoryKey))
                     {
-                        if (!idToCategories.ContainsKey(block.EntityId)) // to avoid creating new lists literally every run
-                        {
-                            idToCategories[block.EntityId] = new List<string>();
-                        }
+                        Category category = Categories[categoryKey];
 
-                        bool hasCategories = false;
+                        ActiveCategories[categoryKey] = category; // doesn't really matter what's used for this key
 
-                        foreach (string name in categories.Keys)
-                        {
-                            Category category = categories[name];
+                        category.Inventories.Add(block);
 
-                            if (block.CustomName.Contains(category.Tag))
-                            {
-                                category.Inventories.Add(block);
+                        IMyInventory inventory = block.GetInventory();
+                        category.CurrentVolume += inventory.CurrentVolume;
+                        category.MaxVolume += inventory.MaxVolume;
 
-                                IMyInventory inventory = block.GetInventory();
-                                category.CurrentVolume += inventory.CurrentVolume;
-                                category.MaxVolume += inventory.MaxVolume;
+                        idToCategoryKeySet[block.EntityId].Add(categoryKey);
 
-                                idToCategories[block.EntityId].Add(name);
-
-                                hasCategories = true;
-                            }
-                        }
-                        if (!hasCategories)
-                        {
-                            miscInventoryBlocks.Add(block);
-
-                            IMyInventory inventory = block.GetInventory();
-                            CurrentMiscVolume += inventory.CurrentVolume;
-                            MaxMiscVolume += inventory.MaxVolume;
-                        }
+                        hasCategory = true;
                     }
                 }
+                return hasCategory;
             }
             
             public void SortItems()
@@ -318,76 +360,57 @@ namespace IngameScript
                  * push items towards the 'best' inventory
                  */
 
-                foreach (IMyTerminalBlock block in inventoryBlocks)
+                foreach (IMyTerminalBlock block in inventoryBlocks) // if inventoryBlocks isn't up to date (possible), this will crash and burn
                 {
                     items.Clear();
                     block.GetInventory().GetItems(items);
-                    
+
                     foreach (MyInventoryItem item in items)
-                    {
-                        List<string> blockCategories = idToCategories[block.EntityId];
-
-                        // it might be more accurate to call this 'full type'
-                        // i'm not using the actual subtype because it would cause conflicts between ingots/ores
-                        string subtype = item.Type.ToString();
-                        string type = item.Type.TypeId;
-
-                        if (typeToCategory.ContainsKey(type) && typeToCategory.ContainsKey(subtype)) // for items that are known
-                        {
-                            string specificCategory = typeToCategory[subtype];
-                            string generalCategory = typeToCategory[type];
-
-                            bool moved = false;
-
-                            if (categories[specificCategory].Inventories.Count > 0)
-                            {
-                                if (blockCategories.Contains(specificCategory))
-                                {
-                                    moved = true;
-                                }
-                                else
-                                {
-                                    if (MoveToTarget(block.GetInventory(), categories[specificCategory], item))
-                                    {
-                                        moved = true;
-                                    }
-                                }
-                            }
-                            if (!moved && categories[generalCategory].Inventories.Count > 0)
-                            {
-                                if (blockCategories.Contains(generalCategory))
-                                {
-                                    moved = true;
-                                }
-                                else
-                                {
-                                    if (MoveToTarget(block.GetInventory(), categories[generalCategory], item))
-                                    {
-                                        moved = true;
-                                    }
-                                }
-                            }
-                            if (!moved)
-                            {
-                                if (blockCategories.Count > 0)
-                                {
-                                    MoveToMisc(block.GetInventory(), item);
-                                }
-                            }
-                        }
-                        else // for unknown items
-                        {
-                            parent.Echo($"unknown item:\n{item.Type.ToString()}");
-                            if (blockCategories.Count > 0) // this and similar above is to prevent pushing from misc. storage to misc. storage
-                            {
-                                MoveToMisc(block.GetInventory(), item);
-                            }
-                        }
-                    }
+                        PushItem(block, item);
                 }   
             }
+            
+            private void PushItem(IMyTerminalBlock from, MyInventoryItem item)
+            {
+                /*
+                 * tries to push item to the most appropriate inventory, or returns if it can't
+                 * there's some repeated code here, but come on, i'm not writing a function for 2 calls
+                 */
 
-            private bool MoveToTarget(IMyInventory source, Category target, MyInventoryItem item)
+                HashSet<string> blockCategoryKeySet = idToCategoryKeySet[from.EntityId];
+
+                // it might be more accurate to call this 'full type'
+                // i'm not using the actual subtype because it would cause conflicts between ingots/ores
+                string subtype = item.Type.ToString();
+                string type = item.Type.TypeId;
+
+                string categoryKey;
+
+                if (typeToCategoryKey.TryGetValue(subtype, out categoryKey)) // to avoid exceptions with unregistered items
+                {
+                    if (blockCategoryKeySet.Contains(categoryKey)) // already in the right place
+                        return;
+                    if (Categories[categoryKey].Inventories.Count > 0) // if there's a place to put it
+                    {
+                        if (TryMoveToTarget(from.GetInventory(), Categories[categoryKey], item)) // if it could actually be moved to any matching chest
+                            return;
+                    }
+                }
+                if (typeToCategoryKey.TryGetValue(type, out categoryKey))
+                {
+                    if (blockCategoryKeySet.Contains(categoryKey)) // already in the right place
+                        return;
+                    if (Categories[categoryKey].Inventories.Count > 0) // if there's a place to put it
+                    {
+                        if (TryMoveToTarget(from.GetInventory(), Categories[categoryKey], item)) // if it could actually be moved to any matching chest
+                            return;
+                    }
+                }
+                if (blockCategoryKeySet.Count > 0) // if the current inventory isn't misc.
+                    MoveToMisc(from.GetInventory(), item);
+            }
+
+            private bool TryMoveToTarget(IMyInventory source, Category target, MyInventoryItem item)
             {
                 /*
                  * try to move the item from the source inventory to an inventory of the appropriate category
@@ -397,12 +420,11 @@ namespace IngameScript
                 {
                     IMyInventory destination = block.GetInventory();
 
-                    if (source.CanTransferItemTo(destination, item.Type)) // not worrying about amounts
+                    // TransferItemTo() returns true even if nothing was moved (but the type was appropriate)
+                    if (source.CanTransferItemTo(destination, item.Type) && !destination.IsFull) // connected and room available
                     {
-                        if (!destination.IsFull && source.TransferItemTo(destination, item)) // TransferItemTo returns true even if nothing was transferred
-                        {
+                        if (source.TransferItemTo(destination, item))
                             return true;
-                        }
                     }
                 }
                 return false;
@@ -413,51 +435,65 @@ namespace IngameScript
                 /*
                  * try to move the item to an uncategorized inventory
                  */
+
                 foreach (IMyTerminalBlock block in miscInventoryBlocks)
                 {
                     IMyInventory destination = block.GetInventory();
 
-                    if (source.CanTransferItemTo(destination, item.Type)) // not worrying about amounts
+                    if (source.CanTransferItemTo(destination, item.Type) && !destination.IsFull) // same as above
                     {
-                        if (!destination.IsFull && source.TransferItemTo(destination, item)) // TransferItemTo returns true even if nothing was transferred
-                        {
+                        if (source.TransferItemTo(destination, item)) // TransferItemTo returns true even if nothing was transferred
                             return;
-                        }
                     }
                 }
             }
         }
 
-        class Panel
+        class Surface
         {
-            public IMyTextPanel TextPanel { get; }
+            /*
+             * just for holding data together, could be used for expanding the displays
+             * would be more useful with multiple outputs
+             */
+
+            Color foregroundColor = Color.LightGreen;
+            Color backgroundColor = Color.Black;
+
+            public IMyTextSurface TextSurface { get; }
             public RectangleF ViewRect { get; } = new RectangleF();
 
-            public Panel(IMyTextPanel textPanel, RectangleF viewRect)
+            public Surface(IMyTextSurface textSurface, RectangleF viewRect)
             {
-                TextPanel = textPanel;
+                TextSurface = textSurface;
                 ViewRect = viewRect;
+
+                ConfigurePanel();
+            }
+
+            private void ConfigurePanel()
+            {
+                TextSurface.ContentType = ContentType.SCRIPT;
+                TextSurface.Script = string.Empty;
+                TextSurface.ScriptForegroundColor = foregroundColor;
+                TextSurface.ScriptBackgroundColor = backgroundColor;
             }
         }
 
         class Output
         {
+            /*
+             * handles, well, output
+             */
+
             Program parent;
             InventoryManager inventoryManager;
 
-            // terminal i/o
-            Color foregroundColor = Color.Green;
-            Color backgroundColor = Color.Black;
-
-            IMyTextSurface pBlockSurface;
-            RectangleF pBlockViewRect = new RectangleF();
-
-            IMyTextPanel outPanel;
-            RectangleF outViewRect = new RectangleF();
+            Surface pBlockSurface;
 
             // if you need more than 40 catergories to sort by, you might need help
             // that, or i have severely underestimated the users of this script
-            // todo: try to make this expandable (preferably with multiple screens)
+            // xtodo: try to make this expandable (preferably with multiple screens)
+            // todo: the goals of this script have changed, counting inventory is not a priority right now
             int outputRows = 8;
             int outputColumns = 5;
 
@@ -466,60 +502,75 @@ namespace IngameScript
             MySprite sprite; // not very beneficial since new sprites must be created anyways
 
             // reusable lists
-            List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
+            List<IMyTerminalBlock> panelBlocks = new List<IMyTerminalBlock>();
 
             public Output(Program parent, InventoryManager inventoryManager)
             {
                 this.parent = parent;
                 this.inventoryManager = inventoryManager;
 
-                GetDisplays();
+                UpdateDisplays();
             }
-
-            public void GetDisplays()
+            
+            public void UpdateDisplays()
             {
-                pBlockSurface = parent.Me.GetSurface(0);
-                pBlockSurface.ContentType = ContentType.SCRIPT;
-                pBlockSurface.Script = string.Empty;
-                pBlockSurface.ScriptForegroundColor = foregroundColor;
-                pBlockSurface.ScriptBackgroundColor = backgroundColor;
+                /*
+                * refresh the display panels
+                */
 
-                pBlockViewRect.Position = (pBlockSurface.TextureSize - pBlockSurface.SurfaceSize) / 2f;
-                pBlockViewRect.Size = pBlockSurface.SurfaceSize;
+                IMyTextSurface surface = parent.Me.GetSurface(0);
+                RectangleF viewRect = new RectangleF((surface.TextureSize - surface.SurfaceSize) / 2f, surface.SurfaceSize);
 
-                blocks.Clear();
-
-                parent.GridTerminalSystem.SearchBlocksOfName("[out]", blocks, b => b is IMyTextPanel);
-
-                if (blocks.Count > 0)
-                {
-                    outPanel = blocks[0] as IMyTextPanel;
-                    outPanel.ContentType = ContentType.SCRIPT;
-                    outPanel.Script = string.Empty;
-                    outPanel.ScriptForegroundColor = foregroundColor;
-                    outPanel.ScriptBackgroundColor = backgroundColor;
-
-                    outViewRect.Position = (outPanel.TextureSize - outPanel.SurfaceSize) / 2f;
-                    outViewRect.Size = outPanel.SurfaceSize;
-                }
+                pBlockSurface = new Surface(surface, viewRect);
             }
 
             public void ShowOutput()
             {
-                var pBlockFrame = pBlockSurface.DrawFrame();
-                DisplayInventory(ref pBlockFrame, pBlockViewRect);
-                pBlockFrame.Dispose();
+                /*
+                 * placeholder incase there are multiple output functions for different types of panels
+                 */
 
-                if (outPanel != null)
-                {
-                    MySpriteDrawFrame outFrame = outPanel.DrawFrame();
-                    DisplayInventory(ref outFrame, outViewRect);
-                    outFrame.Dispose();
-                }
+                DisplayPerformance(pBlockSurface);
             }
 
-            private void DisplayInventory(ref MySpriteDrawFrame frame, RectangleF viewRect)
+            private void DisplayPerformance(Surface surface)
             {
+                /*
+                 * display the last run times on the surface
+                 */
+
+                MySpriteDrawFrame frame = surface.TextSurface.DrawFrame();
+                RectangleF viewRect = surface.ViewRect;
+                Color color = surface.TextSurface.ScriptForegroundColor;
+
+                spritePosition = viewRect.Center;
+                spritePosition.Y -= 20;
+
+                sprite = new MySprite()
+                {
+                    Type = SpriteType.TEXT,
+                    Data = $"last run: {parent.LastRunTime}ms ({parent.LastRunType})" +
+                           $"\nlast average: {parent.LastAverage}ms ({parent.RunsPerAverage} runs)",
+                    Position = spritePosition,
+                    RotationOrScale = 0.6f,
+                    Color = color,
+                    Alignment = TextAlignment.CENTER,
+                    FontId = "Monospace"
+                };
+                frame.Add(sprite);
+                frame.Dispose();
+            }
+
+            private void DisplayInventory(Surface surface)
+            {
+                /*
+                 * currently unused
+                 * displays inventory information on the surface
+                 */
+
+                MySpriteDrawFrame frame = surface.TextSurface.DrawFrame();
+                RectangleF viewRect = surface.ViewRect;
+
                 float xOffset = viewRect.Size.X / (outputColumns * 2);
                 float cWidth = viewRect.Size.X / outputColumns;
                 float yOffset = viewRect.Size.Y / (outputRows * 2);
@@ -530,22 +581,19 @@ namespace IngameScript
 
                 int entryIndex = 0;
 
-                foreach (string name in inventoryManager.categories.Keys) // category outputs
+                foreach (string name in inventoryManager.ActiveCategories.Keys) // category outputs
                 {
-                    Category category = inventoryManager.categories[name];
+                    Category category = inventoryManager.ActiveCategories[name];
 
-                    if (category.Inventories.Count > 0)
-                    {
-                        spritePosition.X = viewRect.X + xOffset + (entryIndex / outputRows) * cWidth;
-                        spritePosition.Y = viewRect.Y + yOffset + (entryIndex % outputRows) * rHeight;
+                    spritePosition.X = viewRect.X + xOffset + (entryIndex / outputRows) * cWidth;
+                    spritePosition.Y = viewRect.Y + yOffset + (entryIndex % outputRows) * rHeight;
 
-                        percent = (double) category.CurrentVolume.RawValue / category.MaxVolume.RawValue;
-                        bars = (int) Math.Ceiling(percent * 9); // this will show one bar if an inventory has anything in it
+                    percent = (double) category.CurrentVolume.RawValue / category.MaxVolume.RawValue;
+                    bars = (int) Math.Ceiling(percent * 9); // todo: fix this
 
-                        AddEntry(ref frame, bars, name);
+                    AddEntry(ref frame, bars, name);
 
-                        entryIndex++;
-                    }
+                    entryIndex++;
                 }
 
                 // misc. inventories
@@ -553,13 +601,20 @@ namespace IngameScript
                 spritePosition.Y = viewRect.Y + yOffset + (entryIndex % outputRows) * rHeight;
 
                 percent = (double)inventoryManager.CurrentMiscVolume.RawValue / inventoryManager.MaxMiscVolume.RawValue;
-                bars = (int) Math.Ceiling(percent * 9); // same as above
+                bars = (int) Math.Ceiling(percent * 9); // todo: and this
 
                 AddEntry(ref frame, bars, "Other");
+
+                frame.Dispose();
             }
 
-            public void AddEntry(ref MySpriteDrawFrame frame, int bars, string name)
+            private void AddEntry(ref MySpriteDrawFrame frame, int bars, string name)
             {
+                /*
+                 * currently unused
+                 * adds entry for category info
+                 */
+
                 Color color = bars == 10 ? Color.Yellow : Color.White; // this does not spark joy
 
                 string barString = $"[{new String('|', bars)}{new String('-', 10 - bars)}]";
@@ -569,7 +624,7 @@ namespace IngameScript
                 sprite = new MySprite()
                 {
                     Type = SpriteType.TEXT,
-                    Data = barString,
+                    Data = $"{barString}",
                     Position = spritePosition,
                     RotationOrScale = 0.4f,
                     Color = color,
@@ -594,11 +649,21 @@ namespace IngameScript
             }
         }
 
+        // ty https://github.com/malware-dev/MDK-SE/wiki/Coroutines---Run-operations-over-multiple-ticks
+        IEnumerator<bool> routine;
+
         InventoryManager inventoryManager;
         Output output;
 
-        int runCount = 0, runsPerAverage = 10;
-        double totalTime = 0;
+        // performance metrics
+        public int RunCount { get; set; } = 0;
+
+        public int RunsPerAverage { get; } = 10;
+        public double TotalTimeSinceLastAverage { get; set; } = 0;
+
+        public double LastRunTime { get; set; }
+        public double LastAverage { get; set; }
+        public string LastRunType { get; set; }
 
         public Program()
         {
@@ -606,6 +671,8 @@ namespace IngameScript
             output = new Output(this, inventoryManager);
 
             Runtime.UpdateFrequency = UpdateFrequency.Update100; // 'register' for i/o updates
+
+            routine = DoRoutine();
         }
 
         public void Save()
@@ -616,34 +683,52 @@ namespace IngameScript
 
         public void Main(string argument, UpdateType updateSource)
         {
-            // main i/o thread
-            if ((updateSource & UpdateType.Update100) != 0)
+            if ((updateSource & UpdateType.Update100) != 0) // main 'thread'
             {
-                inventoryManager.GetInventories(); // expensive probably, should do once every so many runs, idk
-                inventoryManager.SortItems();
+                if (!routine.MoveNext())
+                {
+                    routine.Dispose();
+                    routine = DoRoutine();
+                }
 
-                output.GetDisplays();
                 output.ShowOutput();
 
-                CheckPerformance();
+                UpdatePerformance();
             }
         }
 
-        public void CheckPerformance()
+        private void UpdatePerformance()
         {
-            totalTime += Runtime.LastRunTimeMs;
-            runCount++;
+            /*
+             * update performance stats
+             */
 
-            // todo: optimize startup (~5ms is good but maybe better)
-            // todo: optimize (if possible) the regular execution (iterating through the giant dictionary isn't helping)
-            Echo($"last run: {Runtime.LastRunTimeMs}ms");
+            LastRunTime = Runtime.LastRunTimeMs;
+            TotalTimeSinceLastAverage += LastRunTime;
+            RunCount++;
 
-            if (runCount % runsPerAverage == 0)
+            if (RunCount % RunsPerAverage == 0)
             {
-                Echo($"average: {totalTime / runsPerAverage}ms\n(last {runsPerAverage} runs)");
-                runCount = 0;
-                totalTime = 0;
+                LastAverage = TotalTimeSinceLastAverage / RunsPerAverage;
+                RunCount = 0;
+                TotalTimeSinceLastAverage = 0;
             }
+        }
+
+        private IEnumerator<bool> DoRoutine()
+        {
+            /*
+             * the two most expensive operations will run on separate calls to improve game performance
+             */
+
+            LastRunType = "sorting";
+            inventoryManager.UpdateInventories();
+            output.UpdateDisplays();
+
+            yield return true;
+
+            LastRunType = "updating blocks";
+            inventoryManager.SortItems();
         }
         #endregion
     }
