@@ -1,7 +1,0 @@
-﻿R e a d m e
------------
-
-supposed to give a travel eta for an object scanned with the camera
-trigger the script to set a target, which actually has to be a physical object (not just space)
-works best when traveling directly towards the location at a constant speed
-displays output using the custom name
