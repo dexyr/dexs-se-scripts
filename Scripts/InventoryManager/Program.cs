@@ -25,7 +25,7 @@ namespace IngameScript
 
         class Category {
             /*
-             * the main thin that makes this work
+             * the main thing that makes this work
              * this handles the different sorting categories that items/blocks can belong to
              */
 
